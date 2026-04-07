@@ -12,8 +12,9 @@ def load_data():
         # CLEANING HEADERS
         df.columns = [c.strip() for c in df.columns]
         
-        # CLEANING DATA: Removing hidden spaces from every single cell
-        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        # CLEANING DATA: The "New" way that avoids the 'applymap' error
+        # This removes hidden spaces from every cell in the spreadsheet
+        df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
         
         # Ensure dates are working
         df['Effective From'] = pd.to_datetime(df['Effective From'], errors='coerce')
@@ -36,10 +37,8 @@ if df is not None:
         sections = sorted([s for s in df['Section'].unique() if str(s) != 'nan'])
         section = st.selectbox("1. Select Section", options=sections)
         
-        # Filter for the selected section
         filtered_df = df[df['Section'] == section]
         
-        # NATURE OF PAYMENT - This is the key for 194I
         nature_options = sorted([n for n in filtered_df['Nature of Payment'].unique() if str(n) != 'nan'])
         nature_selection = st.selectbox("2. Nature of Payment", options=nature_options)
 
@@ -49,16 +48,19 @@ if df is not None:
         pay_date = st.date_input("5. Transaction Date")
         calc_mode = st.radio("Basis:", ["Single Transaction", "Aggregate (Full Year)"])
 
+    st.write("---")
+    
+    # 3. CALCULATION LOGIC
     if st.button("🚀 Calculate"):
         target = pd.to_datetime(pay_date)
         
-        # STEP 1: Find the exact row matching Section AND Nature
+        # Match Section and Nature of Payment exactly
         match = filtered_df[filtered_df['Nature of Payment'] == nature_selection]
         
-        # STEP 2: Filter by Date
+        # Filter by Date
         rule = match[(match['Effective From'] <= target) & (match['Effective To'] >= target)]
         
-        # If no date match, take the latest one
+        # Fallback to the most recent entry if date match fails
         if rule.empty and not match.empty:
             rule = match.sort_values(by='Effective From', ascending=False).head(1)
 
@@ -67,26 +69,26 @@ if df is not None:
             rate_raw = str(sel['Rate of TDS (%)']).strip().lower()
             
             if rate_raw == 'avg':
-                st.info(f"💡 {sel['Notes']}")
+                st.info(f"💡 **Salary/Specified Bank Note:** {sel['Notes']}")
             else:
                 try:
+                    # Convert values to float for math
                     base = float(sel['Rate of TDS (%)'])
                     final_rate = 20.0 if pan_status == "No" else base
                     thresh = float(sel['Threshold Amount (Rs)'])
                     
-                    # 194C Aggregate Logic
+                    # 194C Aggregate Logic override
                     if section == "194C" and calc_mode == "Aggregate (Full Year)":
                         thresh = 100000.0
                     
                     if amount > thresh:
                         tax = (amount * final_rate) / 100
-                        st.success(f"### Deduct: ₹{tax:,.2f}")
-                        st.write(f"**Section:** {section} | **Rate:** {final_rate}%")
+                        st.success(f"### Result: Deduct ₹{tax:,.2f}")
+                        st.write(f"**Applied Rate:** {final_rate}% | **Limit:** ₹{thresh:,.0f}")
                     else:
-                        st.warning(f"Below Threshold (Limit: ₹{thresh:,.0f})")
+                        st.warning(f"### Result: No TDS Required")
+                        st.write(f"Amount is below the threshold of **₹{thresh:,.0f}**.")
                 except Exception as e:
-                    st.error(f"Calculation Error: Check if Rate/Threshold are numbers in Excel. Error: {e}")
+                    st.error(f"Calculation Error: Check your Excel values. {e}")
         else:
-            # THIS PREVENTS THE BLANK SCREEN
-            st.error("❌ No matching rule found in the Excel for this combination.")
-            st.info("Check if the 'Nature of Payment' matches exactly between your selection and the Excel row.")
+            st.error("❌ No matching rule found. Check if 'Nature of Payment' is spelled correctly in Excel.")
