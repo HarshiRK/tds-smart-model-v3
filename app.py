@@ -1,95 +1,79 @@
 import streamlit as st
 import pandas as pd
 
-# 1. PAGE CONFIGURATION
 st.set_page_config(page_title="TDS Smart Model V3", layout="wide")
 
 @st.cache_data
 def load_data():
     try:
-        # Load the renamed Excel file
         df = pd.read_excel("TDS_Master_Data.xlsx", engine='openpyxl')
-        
-        # CLEANING HEADERS
         df.columns = [c.strip() for c in df.columns]
+        # Robust cleaning for all text columns
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype(str).str.strip()
         
-        # CLEANING DATA: Removes hidden spaces from text columns to ensure matching works
-        df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-        
-        # DATE HANDLING
         df['Effective From'] = pd.to_datetime(df['Effective From'], errors='coerce')
         df['Effective To'] = pd.to_datetime(df['Effective To'], errors='coerce').fillna(pd.Timestamp('2099-12-31'))
-        
         return df
     except Exception as e:
-        st.error(f"Excel Load Error: {e}. Please ensure 'TDS_Master_Data.xlsx' is uploaded to GitHub.")
+        st.error(f"Excel Error: {e}")
         return None
 
-# Load the data
 df = load_data()
 
 if df is not None:
-    st.title("🏛️ TDS Calculation Portal - Advanced V3")
-    st.markdown("### *Dynamic Asset & Threshold Compliance Model*")
-    st.write("---")
-
-    # 2. USER INPUT SECTION
+    st.title("🏛️ TDS Calculation Portal - V3")
+    
     col1, col2 = st.columns(2)
-
     with col1:
-        st.info("📊 **Transaction Details**")
-        # Section selection
-        sections = sorted([s for s in df['Section'].unique() if str(s) != 'nan'])
-        section = st.selectbox("1. Select Income Tax Section", options=sections)
-        
-        # Filter data for the selected section to get Nature of Payment options
+        sections = sorted([s for s in df['Section'].unique() if s != 'nan'])
+        section = st.selectbox("1. Section", options=sections)
         filtered_df = df[df['Section'] == section]
-        nature_options = sorted([n for n in filtered_df['Nature of Payment'].unique() if str(n) != 'nan'])
-        nature_selection = st.selectbox("2. Nature of Payment (Asset Type)", options=nature_options)
         
-        # Amount input
-        amount = st.number_input("3. Enter Amount (INR)", min_value=0.0, step=1000.0, value=250000.0)
+        natures = sorted([n for n in filtered_df['Nature of Payment'].unique() if n != 'nan'])
+        nature_selection = st.selectbox("2. Nature of Payment", options=natures)
+        
+        amount = st.number_input("3. Amount (INR)", min_value=0.0, value=250000.0)
 
     with col2:
-        st.info("👤 **Compliance Parameters**")
-        # PAN status
-        pan_status = st.radio("4. Does the Payee have a PAN?", ["Yes", "No"])
-        
-        # Date selection
-        pay_date = st.date_input("5. Transaction Date")
-        
-        # Calculation Mode (Single vs Aggregate)
-        calc_mode = st.radio("6. Threshold Calculation Basis:", ["Single Transaction", "Aggregate (Full Year)"])
+        pan_status = st.radio("4. PAN Available?", ["Yes", "No"])
+        pay_date = st.date_input("5. Date")
+        calc_mode = st.radio("6. Basis", ["Single Transaction", "Aggregate (Full Year)"])
 
-    st.write("---")
-    
-    # 3. CALCULATION & RESULT SECTION
-    if st.button("🚀 Run Compliance Check"):
+    if st.button("🚀 Calculate"):
         target = pd.to_datetime(pay_date)
-        
-        # Match the specific row in Excel
         match = filtered_df[filtered_df['Nature of Payment'] == nature_selection]
-        
-        # Filter by Date Range
         rule = match[(match['Effective From'] <= target) & (match['Effective To'] >= target)]
         
-        # Fallback to latest if date range doesn't match perfectly
         if rule.empty and not match.empty:
             rule = match.sort_values(by='Effective From', ascending=False).head(1)
 
         if not rule.empty:
             sel = rule.iloc[0]
-            rate_raw = str(sel['Rate of TDS (%)']).strip().lower()
-            
-            # Special case for Salaries (Section 192) or Bank Interest (Section 194P)
-            if rate_raw == 'avg':
-                st.info(f"💡 **Note for {section}:** {sel['Notes']}")
-            else:
-                try:
-                    # Pull values from Excel
-                    base_rate = float(sel['Rate of TDS (%)'])
-                    # Apply 20% penalty if PAN is missing
-                    final_rate = 20.0 if pan_status == "No" else base_rate
-                    
-                    # Pull threshold from Excel
-                    threshold = float(
+            try:
+                base_rate = float(sel['Rate of TDS (%)'])
+                final_rate = 20.0 if pan_status == "No" else base_rate
+                thresh = float(sel['Threshold Amount (Rs)'])
+                
+                # 194C Aggregate Override
+                if section == "194C" and calc_mode == "Aggregate (Full Year)":
+                    thresh = 100000.0
+                
+                if amount > thresh:
+                    tax = (amount * final_rate) / 100
+                    st.success(f"### ✅ Deduct: ₹{tax:,.2f}")
+                    st.metric("Rate", f"{final_rate}%")
+                else:
+                    st.warning(f"### ⚠️ No TDS Required")
+                    st.write(f"Amount ₹{amount:,.0f} is not above ₹{thresh:,.0f}")
+                
+                # DEBUG BOX (Show this to your manager to prove it's working)
+                with st.expander("View Calculation Logic"):
+                    st.write(f"**Section Matched:** {sel['Section']}")
+                    st.write(f"**Threshold in Excel:** ₹{thresh:,.0f}")
+                    st.write(f"**Rate in Excel:** {base_rate}%")
+                    st.write(f"**Date Range:** {sel['Effective From'].date()} to {sel['Effective To'].date()}")
+            except:
+                st.error("Check Excel: Rates/Thresholds must be plain numbers (no % signs).")
+        else:
+            st.error("No matching rule found for this date/nature.")
