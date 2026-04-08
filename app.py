@@ -1,66 +1,79 @@
 import streamlit as st
 import pandas as pd
 
+# 1. PAGE CONFIGURATION
 st.set_page_config(page_title="TDS Smart Model V3", layout="wide")
 
 @st.cache_data
 def load_data():
     try:
-        # Load the Excel file
+        # Load the renamed Excel file
         df = pd.read_excel("TDS_Master_Data.xlsx", engine='openpyxl')
         
         # CLEANING HEADERS
         df.columns = [c.strip() for c in df.columns]
         
-        # CLEANING DATA: The "New" way that avoids the 'applymap' error
-        # This removes hidden spaces from every cell in the spreadsheet
+        # CLEANING DATA: Removes hidden spaces from text columns to ensure matching works
         df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
         
-        # Ensure dates are working
+        # DATE HANDLING
         df['Effective From'] = pd.to_datetime(df['Effective From'], errors='coerce')
         df['Effective To'] = pd.to_datetime(df['Effective To'], errors='coerce').fillna(pd.Timestamp('2099-12-31'))
         
         return df
     except Exception as e:
-        st.error(f"Excel Load Error: {e}")
+        st.error(f"Excel Load Error: {e}. Please ensure 'TDS_Master_Data.xlsx' is uploaded to GitHub.")
         return None
 
+# Load the data
 df = load_data()
 
 if df is not None:
-    st.title("🏛️ TDS Smart Model V3")
+    st.title("🏛️ TDS Calculation Portal - Advanced V3")
+    st.markdown("### *Dynamic Asset & Threshold Compliance Model*")
     st.write("---")
 
+    # 2. USER INPUT SECTION
     col1, col2 = st.columns(2)
 
     with col1:
+        st.info("📊 **Transaction Details**")
+        # Section selection
         sections = sorted([s for s in df['Section'].unique() if str(s) != 'nan'])
-        section = st.selectbox("1. Select Section", options=sections)
+        section = st.selectbox("1. Select Income Tax Section", options=sections)
         
+        # Filter data for the selected section to get Nature of Payment options
         filtered_df = df[df['Section'] == section]
-        
         nature_options = sorted([n for n in filtered_df['Nature of Payment'].unique() if str(n) != 'nan'])
-        nature_selection = st.selectbox("2. Nature of Payment", options=nature_options)
+        nature_selection = st.selectbox("2. Nature of Payment (Asset Type)", options=nature_options)
+        
+        # Amount input
+        amount = st.number_input("3. Enter Amount (INR)", min_value=0.0, step=1000.0, value=250000.0)
 
     with col2:
-        amount = st.number_input("3. Amount (INR)", min_value=0.0)
-        pan_status = st.radio("4. PAN Available?", ["Yes", "No"])
+        st.info("👤 **Compliance Parameters**")
+        # PAN status
+        pan_status = st.radio("4. Does the Payee have a PAN?", ["Yes", "No"])
+        
+        # Date selection
         pay_date = st.date_input("5. Transaction Date")
-        calc_mode = st.radio("Basis:", ["Single Transaction", "Aggregate (Full Year)"])
+        
+        # Calculation Mode (Single vs Aggregate)
+        calc_mode = st.radio("6. Threshold Calculation Basis:", ["Single Transaction", "Aggregate (Full Year)"])
 
     st.write("---")
     
-    # 3. CALCULATION LOGIC
-    if st.button("🚀 Calculate"):
+    # 3. CALCULATION & RESULT SECTION
+    if st.button("🚀 Run Compliance Check"):
         target = pd.to_datetime(pay_date)
         
-        # Match Section and Nature of Payment exactly
+        # Match the specific row in Excel
         match = filtered_df[filtered_df['Nature of Payment'] == nature_selection]
         
-        # Filter by Date
+        # Filter by Date Range
         rule = match[(match['Effective From'] <= target) & (match['Effective To'] >= target)]
         
-        # Fallback to the most recent entry if date match fails
+        # Fallback to latest if date range doesn't match perfectly
         if rule.empty and not match.empty:
             rule = match.sort_values(by='Effective From', ascending=False).head(1)
 
@@ -68,27 +81,15 @@ if df is not None:
             sel = rule.iloc[0]
             rate_raw = str(sel['Rate of TDS (%)']).strip().lower()
             
+            # Special case for Salaries (Section 192) or Bank Interest (Section 194P)
             if rate_raw == 'avg':
-                st.info(f"💡 **Salary/Specified Bank Note:** {sel['Notes']}")
+                st.info(f"💡 **Note for {section}:** {sel['Notes']}")
             else:
                 try:
-                    # Convert values to float for math
-                    base = float(sel['Rate of TDS (%)'])
-                    final_rate = 20.0 if pan_status == "No" else base
-                    thresh = float(sel['Threshold Amount (Rs)'])
+                    # Pull values from Excel
+                    base_rate = float(sel['Rate of TDS (%)'])
+                    # Apply 20% penalty if PAN is missing
+                    final_rate = 20.0 if pan_status == "No" else base_rate
                     
-                    # 194C Aggregate Logic override
-                    if section == "194C" and calc_mode == "Aggregate (Full Year)":
-                        thresh = 100000.0
-                    
-                    if amount > thresh:
-                        tax = (amount * final_rate) / 100
-                        st.success(f"### Result: Deduct ₹{tax:,.2f}")
-                        st.write(f"**Applied Rate:** {final_rate}% | **Limit:** ₹{thresh:,.0f}")
-                    else:
-                        st.warning(f"### Result: No TDS Required")
-                        st.write(f"Amount is below the threshold of **₹{thresh:,.0f}**.")
-                except Exception as e:
-                    st.error(f"Calculation Error: Check your Excel values. {e}")
-        else:
-            st.error("❌ No matching rule found. Check if 'Nature of Payment' is spelled correctly in Excel.")
+                    # Pull threshold from Excel
+                    threshold = float(
